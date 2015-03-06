@@ -1,0 +1,8 @@
+[package]
+
+name = "oyashio"
+version = "0.0.1"
+authors = ["cgill"]
+
+[dependencies.promise]
+git = "https://github.com/viperscape/rust-promise"
