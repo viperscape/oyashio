@@ -3,4 +3,6 @@
 #*
 .#*
 *.bu
+*main.rs
+*#*#
 /Cargo.lock
