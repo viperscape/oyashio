@@ -60,10 +60,23 @@ impl<T:Send+'static> StreamR<T> {
         ln
     }
 
+    // todo: consider replacing node with Option<node>
+    // this fn always is ok otherwise
+    pub fn shift_try (&mut self) -> Result<Promisee<Node<T>>,String> {
+        let mut nn = None;
+        let ln = self.node.clone();
+
+        {let r = try!(self.node.get());
+         if r.is_some() { nn = Some(r.unwrap().next.clone()); }
+        }
+
+        if nn.is_some() {self.node = nn.unwrap();}
+        Ok(ln)
+    }
+
     // todo: look in to transmute's downsides
-    // eg: if data is in arc, am I ok or need manual drop?
     // should I rewrap the Result as Option, manually?
-    pub fn recv (&mut self) -> Option<&NodeType<T>> {
+    pub fn get (&mut self) -> Option<&NodeType<T>> {
         let pr = self.shift();
         unsafe {
             let rv = pr.with(|x| mem::transmute(&x.data));
@@ -74,26 +87,33 @@ impl<T:Send+'static> StreamR<T> {
         }
     }
 
-    pub fn match_node(&mut self) -> Option<&T> {
-        let mut rv = None;
-        {let r = self.recv();
-         if r.is_some() {
-             rv = match *r.unwrap() {
-                 NodeType::End => None,
-                 NodeType::Start => None, // todo: fixme! this should be skipped instead
-                 NodeType::Data(ref d) => Some(unsafe { mem::transmute(d) }),
-             };
-         }}
-        if rv.is_some() {rv}
-        else {None}
+    pub fn get_try (&mut self) -> Result<&NodeType<T>,String> {
+        let pr = try!(self.shift_try());
+        let r = try!(pr.get());
+        match r {
+            None => Err("no current value".to_string()),
+            Some(v) => unsafe {
+                Ok(mem::transmute(&v.data))
+            },
+        }
     }
 
-    pub fn get (&mut self) -> Option<&T> {
+   /* pub fn match_node(&self, r: &NodeType<T>) -> Option<&T> {
+        let mut rv = None;
+        {rv = match *r {
+            NodeType::End => None,
+            NodeType::Start => None, // todo: fixme! this should be skipped instead
+            NodeType::Data(ref d) => Some(unsafe { mem::transmute(d) }),
+        };
+        }
+        if rv.is_some() {rv}
+        else {None}
+    }*/
+
+    pub fn recv (&mut self) -> Option<&T> {
         let mut rv = None;
 
-        // note: I cannot borrow twice here, somehow below works
-        // I'd like to use match_node fn twice tho
-        {let r = self.recv();
+        {let r = self.get();
          if r.is_some() {
              rv = match *r.unwrap() {
                  NodeType::End => None,
@@ -102,17 +122,64 @@ impl<T:Send+'static> StreamR<T> {
              };
          }}
         
+        // we try twice in order to skip first node
         if rv.is_some() {rv}
         else { //try once more
-            self.match_node()
+            let r = self.get();
+            if r.is_some() {
+                match *r.unwrap() {
+                    NodeType::End => None,
+                    NodeType::Start => None, // todo: fixme! this should be skipped instead
+                    NodeType::Data(ref d) => Some(unsafe { mem::transmute(d) }),
+                }
+            }
+            else {None}
         }
+    }
+
+    pub fn recv_try (&mut self) -> Result<&T,String> {
+        let mut rv = None;
+
+        {let r = try!(self.get_try());
+         rv = match *r {
+             NodeType::End => None,
+             NodeType::Start => None, // todo: fixme! this should be skipped instead
+             NodeType::Data(ref d) => Some(unsafe { mem::transmute(d) }),
+         };
+        }
+
+        // we try twice in order to skip first node
+        if rv.is_some() {Ok(rv.unwrap())}
+        else { //try once more
+            let r = try!(self.get_try());
+            match *r {
+                NodeType::End => Err("End of Stream".to_string()),
+                NodeType::Start => Err("No next node".to_string()),
+                NodeType::Data(ref d) => Ok(unsafe { mem::transmute(d) }),
+            }
+        }
+    }
+
+    pub fn poll(self) -> StreamRPoll<T> {
+        StreamRPoll(self)
     }
     
 }
 impl<'a,T:Send+'static> Iterator for StreamR<T>  {
     type Item=&'a T;
     fn next(&mut self) -> Option<&T> {
-        self.get()
+        self.recv()
+    }
+}
+pub struct StreamRPoll<T>(StreamR<T>);
+impl<'a,T:Send+'static> Iterator for StreamRPoll<T>  {
+    type Item=&'a T;
+    fn next(&mut self) -> Option<&T> {
+        let r = self.0.recv_try();
+        match r {
+            Ok(rv) => Some(rv),
+            Err(_) => None,
+        }
     }
 }
 
@@ -178,7 +245,7 @@ mod tests {
         let (mut st,mut sr) = Stream::new();
 
         st.send(0u8);
-        assert_eq!(sr.get().unwrap(),&0);
+        assert_eq!(sr.recv().unwrap(),&0);
 
         st.send(0u8);
         st.send(1u8);
@@ -195,15 +262,15 @@ mod tests {
         let (mut st,mut sr) = Stream::new();
         let mut sr2 = sr.clone();
         st.send(0u8);
-        assert_eq!(sr.get().unwrap(),&0);
-        assert_eq!(sr2.get().unwrap(),&0);
+        assert_eq!(sr.recv().unwrap(),&0);
+        assert_eq!(sr2.recv().unwrap(),&0);
     }
 
     #[test]
     fn test_stream_close() {
         let (mut st,mut sr) = Stream::<u8>::new();
         st.close();
-        assert_eq!(sr.get(),None);
+        assert_eq!(sr.recv(),None);
     }
 
     #[test]
@@ -212,8 +279,8 @@ mod tests {
         Thread::spawn(move || {
             st.send(0u8);
         });
-        assert_eq!(sr.get().unwrap(),&0);
-        assert_eq!(sr.get(),None);
+        assert_eq!(sr.recv().unwrap(),&0);
+        assert_eq!(sr.recv(),None);
     }
 
    #[bench]
@@ -222,7 +289,7 @@ mod tests {
 
         b.iter(|| {
             st.send(0u8);
-            sr.get().unwrap();
+            sr.recv().unwrap();
         });
     }
 
@@ -236,16 +303,4 @@ mod tests {
             for mut n in vsr.drain() { n.recv().unwrap(); }
         });
     }*/
-
-    #[bench]
-    fn bench_stream_lots(b: &mut test::Bencher) {
-        let (mut st,mut sr) = Stream::new();
-
-        b.iter(|| {
-            for n in (0..1000000) {
-                st.send(n);
-                sr.get().unwrap();
-            }
-        });
-    }
 }

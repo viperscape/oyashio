@@ -1,8 +1,12 @@
 [package]
 
 name = "oyashio"
-version = "0.0.1"
-authors = ["cgill"]
+version = "0.0.2"
+authors = ["Chris Gill"]
+description = "spmc streams"
+repository = "https://github.com/viperscape/oyashio"
+readme = "README.md"
+license = "MIT"
 
 [dependencies.promise]
 git = "https://github.com/viperscape/rust-promise"
