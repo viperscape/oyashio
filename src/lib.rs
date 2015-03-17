@@ -234,14 +234,14 @@ impl<T:Send+'static> Stream<T> {
 
 
 #[derive(Clone)]
-struct StreamRMerge<T> {
+pub struct StreamRMerge<T> {
     streams: Vec<StreamR<T>>,
     idx: usize, //current stream
     eidx: usize, //empty stream count
 }
 
 impl<T:Send+'static> StreamRMerge<T> {
-    fn new (v:Vec<StreamR<T>>) -> StreamRMerge<T> {
+    pub fn new (v:Vec<StreamR<T>>) -> StreamRMerge<T> {
         StreamRMerge { streams:v,idx:0,eidx:0 }
     }
     fn alt (&mut self) -> Option<&T>  {
