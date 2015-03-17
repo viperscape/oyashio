@@ -233,11 +233,62 @@ impl<T:Send+'static> Stream<T> {
 //
 
 
+#[derive(Clone)]
+struct StreamRMerge<T> {
+    streams: Vec<StreamR<T>>,
+    idx: usize, //current stream
+    eidx: usize, //empty stream count
+}
+
+impl<T:Send+'static> StreamRMerge<T> {
+    fn new (v:Vec<StreamR<T>>) -> StreamRMerge<T> {
+        StreamRMerge { streams:v,idx:0,eidx:0 }
+    }
+    fn alt (&mut self) -> Option<&T>  {
+        if self.idx == self.streams.len() { self.idx = 0; }
+        let r = &mut self.streams[self.idx];
+        self.idx += 1;
+        let r = r.recv_try();
+        match r {
+            Ok(v) => {
+                Some(v)
+            },
+            Err(_) => {
+                self.eidx += 1;
+                None
+            }
+        }
+    }
+}
+
+impl<'a,T:Send+'static> Iterator for StreamRMerge<T> {
+    type Item=&'a T;
+    fn next (&mut self) -> Option<&T> {
+        let mut r = None;
+        loop { 
+            unsafe {r = mem::transmute(self.alt());}
+            if r.is_some() { 
+                break;
+            }
+            else { 
+                if self.eidx == self.streams.len() { break; }
+            }
+        }
+
+        self.eidx = 0;
+
+        r
+    }
+}
+
+//
+
 #[cfg(test)]
 mod tests {
     extern crate test;
     extern crate rand;
     use Stream;
+    use StreamRMerge;
     use std::thread::Thread;
 
     #[test]
@@ -281,6 +332,27 @@ mod tests {
         });
         assert_eq!(sr.recv().unwrap(),&0);
         assert_eq!(sr.recv(),None);
+    }
+
+    #[test]
+    fn test_stream_merge() {
+        let (mut st2,mut sr2) = Stream::new();
+        let (mut st, mut sr) = Stream::new();
+        let (mut st3, mut sr3) = Stream::new();
+        
+        for n in (0i32..2) { st.send(n); }
+
+        let mut vr: Vec<i32> = vec!();        
+        let mut vsr = vec![sr,sr2,sr3];
+        
+        let sm = StreamRMerge::new(vsr);
+        
+        for n in (2..4) { st2.send(n); }
+        for n in (4..6) { st3.send(n); }
+        
+        for n in sm.clone() { vr.push(*n); }
+
+        assert_eq!(vr.as_slice(),&[0,2,4,1,3,5]);
     }
 
    #[bench]
