@@ -1,4 +1,4 @@
-#![feature(unsafe_destructor)]
+#![feature(test)]
 
 extern crate promise;
 use promise::{Promiser,Promisee,Promise};
@@ -12,7 +12,7 @@ pub enum NodeType<T> {
 }
 
 #[derive(Clone)]
-pub struct Node<T> {
+pub struct Node<T:Send+'static> {
     pub data: NodeType<T>,
     next: Promisee<Node<T>>,
 }
@@ -20,7 +20,7 @@ pub struct Node<T> {
 //
 
 #[derive(Clone)]
-pub struct StreamR<T> {
+pub struct StreamR<T:Send+'static> {
     node: Promisee<Node<T>>,
 }
 impl<T:Send+'static> StreamR<T> {
@@ -110,7 +110,7 @@ impl<T:Send+'static> StreamR<T> {
         else {None}
     }*/
 
-    pub fn recv (&mut self) -> Option<&T> {
+    pub fn recv (&mut self) -> Option<&'static T> {
         let mut rv = None;
 
         {let r = self.get();
@@ -137,7 +137,7 @@ impl<T:Send+'static> StreamR<T> {
         }
     }
 
-    pub fn recv_try (&mut self) -> Result<&T,String> {
+    pub fn recv_try (&mut self) -> Result<&'static T,String> {
         let mut rv = None;
 
         {let r = try!(self.get_try());
@@ -165,16 +165,16 @@ impl<T:Send+'static> StreamR<T> {
     }
     
 }
-impl<'a,T:Send+'static> Iterator for StreamR<T>  {
-    type Item=&'a T;
-    fn next(&mut self) -> Option<&T> {
+impl<T:Send+'static> Iterator for StreamR<T>  {
+    type Item=&'static T;
+    fn next(&mut self) -> Option<Self::Item> {
         self.recv()
     }
 }
-pub struct StreamRPoll<T>(StreamR<T>);
-impl<'a,T:Send+'static> Iterator for StreamRPoll<T>  {
-    type Item=&'a T;
-    fn next(&mut self) -> Option<&T> {
+pub struct StreamRPoll<T:Send+'static>(StreamR<T>);
+impl<T:Send+'static> Iterator for StreamRPoll<T>  {
+    type Item=&'static T;
+    fn next(&mut self) -> Option<Self::Item> {
         let r = self.0.recv_try();
         match r {
             Ok(rv) => Some(rv),
@@ -185,7 +185,7 @@ impl<'a,T:Send+'static> Iterator for StreamRPoll<T>  {
 
 //
 // todo: work on bounded stream by watching for strong_count on N
-pub struct StreamW<T> {
+pub struct StreamW<T:Send+'static> {
     sink: Promiser<Node<T>>,
 }
 impl<T:Send+'static> StreamW<T> {
@@ -204,7 +204,8 @@ impl<T:Send+'static> StreamW<T> {
         self.sink.deliver(n);
     }
 }
-#[unsafe_destructor]
+
+
 impl<T: Send+'static> Drop for StreamW<T> {
     fn drop (&mut self) {
         self.close();
@@ -234,7 +235,7 @@ impl<T:Send+'static> Stream<T> {
 
 
 #[derive(Clone)]
-pub struct StreamRMerge<T> {
+pub struct StreamRMerge<T:Send+'static> {
     streams: Vec<StreamR<T>>,
     idx: usize, //current stream
     eidx: usize, //empty stream count
@@ -261,9 +262,9 @@ impl<T:Send+'static> StreamRMerge<T> {
     }
 }
 
-impl<'a,T:Send+'static> Iterator for StreamRMerge<T> {
-    type Item=&'a T;
-    fn next (&mut self) -> Option<&T> {
+impl<T:Send+'static> Iterator for StreamRMerge<T> {
+    type Item=&'static T;
+    fn next (&mut self) -> Option<Self::Item> {
         let mut r = None;
         loop { 
             unsafe {r = mem::transmute(self.alt());}
@@ -286,10 +287,9 @@ impl<'a,T:Send+'static> Iterator for StreamRMerge<T> {
 #[cfg(test)]
 mod tests {
     extern crate test;
-    extern crate rand;
     use Stream;
     use StreamRMerge;
-    use std::thread::Thread;
+    use std::thread;
 
     #[test]
     fn test_stream() {
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn test_stream_drop() {
         let (mut st,mut sr) = Stream::new();
-        Thread::spawn(move || {
+        thread::spawn(move || {
             st.send(0u8);
         });
         assert_eq!(sr.recv().unwrap(),&0);
@@ -352,7 +352,7 @@ mod tests {
         
         for n in sm.clone() { vr.push(*n); }
 
-        assert_eq!(vr.as_slice(),&[0,2,4,1,3,5]);
+        assert_eq!(&vr,&[0,2,4,1,3,5]);
     }
 
    #[bench]
