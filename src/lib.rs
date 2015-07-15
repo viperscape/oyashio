@@ -1,11 +1,11 @@
 #![feature(test)]
 
 extern crate promise;
-use promise::{Promiser,Promisee,Promise};
+use promise::{Promiser,Promisee,Promise,Latch};
 use std::mem;
 
 #[derive(Clone,Debug)]
-pub enum NodeType<T> {
+pub enum NodeKind<T> {
     Start,
     Data(T),
     End,
@@ -13,8 +13,9 @@ pub enum NodeType<T> {
 
 #[derive(Clone)]
 pub struct Node<T:Send+'static> {
-    pub data: NodeType<T>,
+    pub data: NodeKind<T>,
     next: Promisee<Node<T>>,
+    latch: Latch,
 }
 
 //
@@ -22,6 +23,7 @@ pub struct Node<T:Send+'static> {
 #[derive(Clone)]
 pub struct StreamR<T:Send+'static> {
     node: Promisee<Node<T>>,
+    broadcast: bool,
 }
 impl<T:Send+'static> StreamR<T> {
     // note: this fn will likely be removed, here for now
@@ -31,9 +33,9 @@ impl<T:Send+'static> StreamR<T> {
         self.node.with(|x| {
             let rv = x.next.with(|xs| {
                 match xs.data {
-                    NodeType::Start => None,
-                    NodeType::End => None,
-                    NodeType::Data(ref d) => Some(f(d)),
+                    NodeKind::Start => None,
+                    NodeKind::End => None,
+                    NodeKind::Data(ref d) => Some(f(d)),
                 }
             });
             
@@ -76,18 +78,39 @@ impl<T:Send+'static> StreamR<T> {
 
     // todo: look in to transmute's downsides
     // should I rewrap the Result as Option, manually?
-    pub fn get (&mut self) -> Option<&NodeType<T>> {
-        let pr = self.shift();
-        unsafe {
-            let rv = pr.with(|x| mem::transmute(&x.data));
-            match rv {
-                Ok(v) => Some(v),
-                _ => None,
+    pub fn get (&mut self) -> Option<&NodeKind<T>> {
+        let mut r = None;
+        loop {
+            let pr = self.shift();
+            let mut lr = true;
+            unsafe {
+                let mut rv = pr.with(|x| {
+                    if !self.broadcast { lr = x.latch.close(); }
+                    mem::transmute(&x.data)
+                });
+                
+                match rv {
+                    Ok(v) => {
+                        if lr { r = Some(v) }
+                        else if !self.broadcast && !lr {
+                            match v {
+                                &NodeKind::End => break,
+                                _=> continue,
+                            }
+                        }
+                        else { r = None }
+                    },
+                    _ => r = None,
+                }
+
+                
+                break;
             }
         }
+        r
     }
 
-    pub fn get_try (&mut self) -> Result<&NodeType<T>,String> {
+    pub fn get_try (&mut self) -> Result<&NodeKind<T>,String> {
         let pr = try!(self.shift_try());
         let r = try!(pr.get());
         match r {
@@ -116,9 +139,9 @@ impl<T:Send+'static> StreamR<T> {
         {let r = self.get();
          if r.is_some() {
              rv = match *r.unwrap() {
-                 NodeType::End => None,
-                 NodeType::Start => None, // todo: fixme! this should be skipped instead
-                 NodeType::Data(ref d) => Some(unsafe { mem::transmute(d) }),
+                 NodeKind::End => None,
+                 NodeKind::Start => None, // todo: fixme! this should be skipped instead
+                 NodeKind::Data(ref d) => Some(unsafe { mem::transmute(d) }),
              };
          }}
         
@@ -128,9 +151,9 @@ impl<T:Send+'static> StreamR<T> {
             let r = self.get();
             if r.is_some() {
                 match *r.unwrap() {
-                    NodeType::End => None,
-                    NodeType::Start => None, // todo: fixme! this should be skipped instead
-                    NodeType::Data(ref d) => Some(unsafe { mem::transmute(d) }),
+                    NodeKind::End => None,
+                    NodeKind::Start => None, // todo: fixme! this should be skipped instead
+                    NodeKind::Data(ref d) => Some(unsafe { mem::transmute(d) }),
                 }
             }
             else {None}
@@ -142,9 +165,9 @@ impl<T:Send+'static> StreamR<T> {
 
         {let r = try!(self.get_try());
          rv = match *r {
-             NodeType::End => None,
-             NodeType::Start => None, // todo: fixme! this should be skipped instead
-             NodeType::Data(ref d) => Some(unsafe { mem::transmute(d) }),
+             NodeKind::End => None,
+             NodeKind::Start => None, // todo: fixme! this should be skipped instead
+             NodeKind::Data(ref d) => Some(unsafe { mem::transmute(d) }),
          };
         }
 
@@ -153,9 +176,9 @@ impl<T:Send+'static> StreamR<T> {
         else { //try once more
             let r = try!(self.get_try());
             match *r {
-                NodeType::End => Err("End of Stream".to_string()),
-                NodeType::Start => Err("No next node".to_string()),
-                NodeType::Data(ref d) => Ok(unsafe { mem::transmute(d) }),
+                NodeKind::End => Err("End of Stream".to_string()),
+                NodeKind::Start => Err("No next node".to_string()),
+                NodeKind::Data(ref d) => Ok(unsafe { mem::transmute(d) }),
             }
         }
     }
@@ -191,16 +214,18 @@ pub struct StreamW<T:Send+'static> {
 impl<T:Send+'static> StreamW<T> {
     pub fn send(&mut self, d:T) {
         let (pt,pr) = Promise::new();
-        let n = Node { data: NodeType::Data(d),
-                       next: pr };
+        let n = Node { data: NodeKind::Data(d),
+                       next: pr,
+                       latch: Latch::new() };
         self.sink.deliver(n);
         self.sink = pt;
     }
     
     pub fn close(&mut self) {
         let (_,pr) = Promise::new();
-        let n = Node { data: NodeType::End,
-                       next: pr };
+        let n = Node { data: NodeKind::End,
+                       next: pr,
+                       latch: Latch::new() };
         self.sink.deliver(n);
     }
 }
@@ -219,14 +244,22 @@ pub struct Stream<T> {
 }
 
 impl<T:Send+'static> Stream<T> {
-    pub fn new() -> (StreamW<T>,StreamR<T>) {
+    pub fn default() -> (StreamW<T>,StreamR<T>) {
         let (pts,prs) = Promise::new();
         let (pt,pr) = Promise::new();
-        let n = Node { data: NodeType::Start,
-                       next: pr };
+        let n = Node { data: NodeKind::Start,
+                       next: pr,
+                       latch: Latch::new() };
         pts.deliver(n);
         (StreamW { sink: pt },
-         StreamR { node: prs } )
+         StreamR { node: prs,
+                   broadcast: false, } )
+    }
+
+    pub fn new_broadcast() -> (StreamW<T>,StreamR<T>) {
+        let (sw, mut sr) = Stream::default();
+        sr.broadcast = true;
+        (sw, sr)
     }
 }
 
@@ -293,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_stream() {
-        let (mut st,mut sr) = Stream::new();
+        let (mut st,mut sr) = Stream::default();
 
         st.send(0u8);
         assert_eq!(sr.recv().unwrap(),&0);
@@ -310,7 +343,17 @@ mod tests {
 
     #[test]
     fn test_stream_dupe() {
-        let (mut st,mut sr) = Stream::new();
+        let (mut st,mut sr) = Stream::default();
+        let mut sr2 = sr.clone();
+        st.send(0u8);
+        st.send(1u8);
+        assert_eq!(sr.recv().unwrap(),&0);
+        assert_eq!(sr2.recv().unwrap(),&1);
+    }
+
+    #[test]
+    fn test_stream_dupe_broadcast() {
+        let (mut st,mut sr) = Stream::new_broadcast();
         let mut sr2 = sr.clone();
         st.send(0u8);
         assert_eq!(sr.recv().unwrap(),&0);
@@ -319,14 +362,14 @@ mod tests {
 
     #[test]
     fn test_stream_close() {
-        let (mut st,mut sr) = Stream::<u8>::new();
+        let (mut st,mut sr) = Stream::<u8>::default();
         st.close();
         assert_eq!(sr.recv(),None);
     }
 
     #[test]
     fn test_stream_drop() {
-        let (mut st,mut sr) = Stream::new();
+        let (mut st,mut sr) = Stream::default();
         thread::spawn(move || {
             st.send(0u8);
         });
@@ -336,9 +379,9 @@ mod tests {
 
     #[test]
     fn test_stream_merge() {
-        let (mut st2,mut sr2) = Stream::new();
-        let (mut st, mut sr) = Stream::new();
-        let (mut st3, mut sr3) = Stream::new();
+        let (mut st2,mut sr2) = Stream::default();
+        let (mut st, mut sr) = Stream::default();
+        let (mut st3, mut sr3) = Stream::default();
         
         for n in (0i32..2) { st.send(n); }
 
@@ -357,9 +400,11 @@ mod tests {
 
    #[bench]
     fn bench_stream(b: &mut test::Bencher) {
-        let (mut st,mut sr) = Stream::new();
+        let (mut st,mut sr) = Stream::default();
 
         b.iter(|| {
+            let mut st = test::black_box(&mut st);
+            let mut sr = test::black_box(&mut sr);
             st.send(0u8);
             sr.recv().unwrap();
         });

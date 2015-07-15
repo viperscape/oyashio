@@ -11,10 +11,20 @@ A single producer, multiple consumer stream
 
 ```rust
 extern crate oyashio;
-use oyashio::{Stream};
+use oyashio::{Stream,StreamRMerge};
 
 fn main () {
-    let (mut st, mut sr) = Stream::new();
+    // stream stealing examples
+    let (mut st, mut sr) = Stream::default();
+    let mut sr2 = sr.clone();
+    for n in (0..10) { st.send(n) }
+    let r2 = sr2.take(4).collect::<Vec<&u8>>();
+    let r = sr.take(4).collect::<Vec<&u8>>();
+    println!("{:?},{:?}",r2,r); //[0, 1, 2, 3],[4, 5, 6, 7]
+
+
+    // broadcast examples    
+    let (mut st, mut sr) = Stream::new_broadcast();
 
     for n in (0..10) { st.send(n) }
 
@@ -24,7 +34,7 @@ fn main () {
               .collect::<Vec<&u8>>();
     println!("{:?}",r); //[1, 3, 5, 7]
 
-    
+
     let mut vr = vec!();
     for (i,n) in sr.clone().enumerate() { //iterates til break
         vr.push(n);
@@ -37,26 +47,26 @@ fn main () {
     // polling iterator, never waits
     for n in sr.poll() { vr.push(n); }
     println!("{:?}",vr); //[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    
-    
+
+
     //stream merge example
-    let (mut st2,mut sr2) = Stream::new();
-    let (mut st, mut sr) = Stream::new();
-    let (mut st3, mut sr3) = Stream::new();
-    
+    let (mut st2,mut sr2) = Stream::new_broadcast();
+    let (mut st, mut sr) = Stream::new_broadcast();
+    let (mut st3, mut sr3) = Stream::new_broadcast();
+
     for n in (0i32..2) { st.send(n); } //0,1
 
     let mut vr: Vec<i32> = vec!();        
     let mut vsr = vec![sr,sr2,sr3];
-    
+
     let sm = StreamRMerge::new(vsr);
-    
+
     for n in (2..4) { st2.send(n); } //2,3
     for n in (4..6) { st3.send(n); } //4,5
-    
+
     for n in sm.clone() { vr.push(*n); }
 
-    assert_eq!(vr.as_slice(),&[0,2,4,1,3,5]);
+    assert_eq!(vr,&[0,2,4,1,3,5]);
 }								
 ```
 
