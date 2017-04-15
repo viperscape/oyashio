@@ -1,5 +1,5 @@
-extern crate promise;
-use promise::{Promiser,Promisee,Promise,Latch};
+extern crate promiser;
+use promiser::{Promiser,Promisee,Promise,Latch};
 use std::mem;
 
 #[derive(Clone,Debug)]
