@@ -1,5 +1,3 @@
-#![feature(test)]
-
 extern crate promise;
 use promise::{Promiser,Promisee,Promise,Latch};
 use std::mem;
@@ -30,7 +28,7 @@ impl<T:Send+'static> StreamR<T> {
     pub fn with<W,F:Fn(&T)->W> (&mut self, f:F) -> Option<W> {
         let mut r = None;
         let mut nn = None;
-        self.node.with(|x| {
+        let _ = self.node.with(|x| {
             let rv = x.next.with(|xs| {
                 match xs.data {
                     NodeKind::Start => None,
@@ -55,9 +53,11 @@ impl<T:Send+'static> StreamR<T> {
     pub fn shift (&mut self) -> Promisee<Node<T>>{
         let mut nn = None;
         let ln = self.node.clone();
-        self.node.with(|x| {
+
+        let _ = self.node.with(|x| {
             nn = Some(x.next.clone()); 
         });
+        
         if nn.is_some() {self.node = nn.unwrap();}
         ln
     }
@@ -84,7 +84,7 @@ impl<T:Send+'static> StreamR<T> {
             let pr = self.shift();
             let mut lr = true;
             unsafe {
-                let mut rv = pr.with(|x| {
+                let rv = pr.with(|x| {
                     if !self.broadcast { lr = x.latch.close(); }
                     mem::transmute(&x.data)
                 });
@@ -161,7 +161,7 @@ impl<T:Send+'static> StreamR<T> {
     }
 
     pub fn recv_try (&mut self) -> Result<&'static T,String> {
-        let mut rv = None;
+        let rv;
 
         {let r = try!(self.get_try());
          rv = match *r {
@@ -298,7 +298,7 @@ impl<T:Send+'static> StreamRMerge<T> {
 impl<T:Send+'static> Iterator for StreamRMerge<T> {
     type Item=&'static T;
     fn next (&mut self) -> Option<Self::Item> {
-        let mut r = None;
+        let mut r: Option<&T>;
         loop { 
             unsafe {r = mem::transmute(self.alt());}
             if r.is_some() { 
@@ -319,7 +319,6 @@ impl<T:Send+'static> Iterator for StreamRMerge<T> {
 
 #[cfg(test)]
 mod tests {
-    extern crate test;
     use Stream;
     use StreamRMerge;
     use std::thread;
@@ -379,45 +378,22 @@ mod tests {
 
     #[test]
     fn test_stream_merge() {
-        let (mut st2,mut sr2) = Stream::default();
-        let (mut st, mut sr) = Stream::default();
-        let (mut st3, mut sr3) = Stream::default();
+        let (mut st2, sr2) = Stream::default();
+        let (mut st, sr) = Stream::default();
+        let (mut st3, sr3) = Stream::default();
         
-        for n in (0i32..2) { st.send(n); }
+        for n in 0..2 { st.send(n); }
 
         let mut vr: Vec<i32> = vec!();        
-        let mut vsr = vec![sr,sr2,sr3];
+        let vsr = vec![sr,sr2,sr3];
         
         let sm = StreamRMerge::new(vsr);
         
-        for n in (2..4) { st2.send(n); }
-        for n in (4..6) { st3.send(n); }
+        for n in 2..4 { st2.send(n); }
+        for n in 4..6 { st3.send(n); }
         
         for n in sm.clone() { vr.push(*n); }
 
         assert_eq!(&vr,&[0,2,4,1,3,5]);
     }
-
-   #[bench]
-    fn bench_stream(b: &mut test::Bencher) {
-        let (mut st,mut sr) = Stream::default();
-
-        b.iter(|| {
-            let mut st = test::black_box(&mut st);
-            let mut sr = test::black_box(&mut sr);
-            st.send(0u8);
-            sr.recv().unwrap();
-        });
-    }
-
-  /* #[bench]
-    fn bench_stream_many(b: &mut test::Bencher) {
-        let (mut st,mut sr) = Stream::new();
-        let mut vsr = vec![sr.clone();1000];
-
-        b.iter(|| {
-            st.send(0u8);
-            for mut n in vsr.drain() { n.recv().unwrap(); }
-        });
-    }*/
 }
